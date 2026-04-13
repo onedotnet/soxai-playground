@@ -1,0 +1,83 @@
+"""Docker container lifecycle management for sandbox sessions."""
+
+import docker
+from docker.types import Resources
+
+from api.config import settings
+
+client = docker.from_env()
+
+
+def create_sandbox(session_id: str, api_key: str, preview_port: int) -> str:
+    """Create and start a sandbox container.
+
+    Returns the container ID.
+    """
+    container = client.containers.run(
+        image=settings.sandbox_image,
+        name=f"sandbox-{session_id}",
+        detach=True,
+        stdin_open=True,
+        tty=True,
+        environment={
+            "SOXAI_API_KEY": api_key,
+            "SOXAI_BASE_URL": settings.soxai_base_url,
+            "SESSION_ID": session_id,
+        },
+        ports={
+            "3000/tcp": preview_port,  # Dev server preview
+            "5173/tcp": preview_port + 1,  # Vite default
+            "8080/tcp": preview_port + 2,  # Generic
+        },
+        mem_limit=settings.sandbox_mem_limit,
+        cpu_period=100000,
+        cpu_quota=int(settings.sandbox_cpu_limit * 100000),
+        network_mode="bridge",
+        working_dir="/workspace",
+        remove=False,  # We clean up manually
+    )
+    return container.id
+
+
+def destroy_sandbox(session_id: str):
+    """Stop and remove a sandbox container."""
+    try:
+        container = client.containers.get(f"sandbox-{session_id}")
+        container.stop(timeout=5)
+        container.remove(force=True)
+    except docker.errors.NotFound:
+        pass
+
+
+def exec_in_sandbox(session_id: str, command: str) -> str:
+    """Execute a command in a running sandbox."""
+    try:
+        container = client.containers.get(f"sandbox-{session_id}")
+        result = container.exec_run(command, demux=True)
+        stdout = result.output[0].decode() if result.output[0] else ""
+        return stdout
+    except docker.errors.NotFound:
+        return ""
+
+
+def get_sandbox_status(session_id: str) -> str:
+    """Get container status: running, exited, or not_found."""
+    try:
+        container = client.containers.get(f"sandbox-{session_id}")
+        return container.status
+    except docker.errors.NotFound:
+        return "not_found"
+
+
+def list_active_sandboxes() -> list[dict]:
+    """List all running sandbox containers."""
+    containers = client.containers.list(filters={"name": "sandbox-"})
+    return [
+        {
+            "id": c.short_id,
+            "name": c.name,
+            "status": c.status,
+            "session_id": c.name.replace("sandbox-", ""),
+        }
+        for c in containers
+    ]
