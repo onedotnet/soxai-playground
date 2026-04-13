@@ -11,6 +11,9 @@ dependencies = [
     "websockets>=13.0",
 ]
 
+[tool.setuptools]
+packages = ["api"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",

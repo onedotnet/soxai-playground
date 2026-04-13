@@ -21,10 +21,15 @@ async def terminal_ws(websocket: WebSocket, session_id: str):
         await websocket.close(code=4004, reason="Container not found")
         return
 
-    # Create an exec instance attached to the container
+    # If a startup script exists (prompt was provided), run it; otherwise plain bash
+    check = client.api.exec_create(container.id, cmd="test -f /workspace/.start.sh")
+    has_startup = client.api.exec_start(check["Id"])
+    startup_exit = client.api.exec_inspect(check["Id"])["ExitCode"]
+    cmd = "/workspace/.start.sh" if startup_exit == 0 else "/bin/bash"
+
     exec_id = client.api.exec_create(
         container.id,
-        cmd="/bin/bash",
+        cmd=cmd,
         stdin=True,
         tty=True,
         stdout=True,

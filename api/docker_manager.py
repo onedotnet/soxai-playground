@@ -8,7 +8,38 @@ from api.config import settings
 client = docker.from_env()
 
 
-def create_sandbox(session_id: str, api_key: str, preview_port: int) -> str:
+def _build_env(api_key: str, session_id: str, tool: str, prompt: str) -> dict[str, str]:
+    """Build environment variables for the sandbox container.
+
+    Sets the correct auth vars directly so they're available to all
+    processes (entrypoint, docker exec, etc.), not just PID 1.
+    """
+    gateway = settings.soxai_base_url
+    env = {
+        "SESSION_ID": session_id,
+        "TOOL_TYPE": tool,
+        "USER_PROMPT": prompt,
+        "SOXAI_API_KEY": api_key,
+        "SOXAI_BASE_URL": gateway,
+    }
+
+    # Always set both — Claude Code needs ANTHROPIC_*, user apps may need OPENAI_*
+    env["ANTHROPIC_BASE_URL"] = gateway
+    env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    env["ANTHROPIC_API_KEY"] = ""  # Must be empty when using AUTH_TOKEN
+    env["OPENAI_API_KEY"] = api_key
+    env["OPENAI_BASE_URL"] = f"{gateway}/v1"
+
+    return env
+
+
+def create_sandbox(
+    session_id: str,
+    api_key: str,
+    preview_port: int,
+    tool: str = "claude",
+    prompt: str = "",
+) -> str:
     """Create and start a sandbox container.
 
     Returns the container ID.
@@ -19,11 +50,7 @@ def create_sandbox(session_id: str, api_key: str, preview_port: int) -> str:
         detach=True,
         stdin_open=True,
         tty=True,
-        environment={
-            "SOXAI_API_KEY": api_key,
-            "SOXAI_BASE_URL": settings.soxai_base_url,
-            "SESSION_ID": session_id,
-        },
+        environment=_build_env(api_key, session_id, tool, prompt),
         ports={
             "3000/tcp": preview_port,  # Dev server preview
             "5173/tcp": preview_port + 1,  # Vite default

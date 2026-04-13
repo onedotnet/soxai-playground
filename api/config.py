@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     # Preview
     preview_domain: str = "play.soxai.io"
 
-    # SoxAI API (default gateway for sandbox containers)
-    soxai_base_url: str = "https://api.soxai.io"
+    # Public hostname for this API (used in WebSocket URLs returned to clients)
+    public_url: str = "https://playground-dev.soxai.io"
+
+    # SoxAI Gateway (AI requests go through gateway, not API server)
+    soxai_base_url: str = "https://gateway-dev.soxai.io"
 
     model_config = {
         "env_prefix": "PLAYGROUND_",

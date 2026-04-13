@@ -26,6 +26,7 @@ _next_port = 10000  # Starting port for preview
 class CreateSessionRequest(BaseModel):
     api_key: str
     tool: str = "claude"  # claude or codex
+    prompt: str = ""  # development prompt to auto-start the AI tool
 
 
 class SessionResponse(BaseModel):
@@ -70,13 +71,13 @@ def _cleanup_expired():
     # Process queue
     while _queue and _active_count() < settings.max_sessions:
         queued = _queue.pop(0)
-        _start_session(queued["session_id"], queued["api_key"], queued["port"])
+        _start_session(queued["session_id"], queued["api_key"], queued["port"], queued.get("tool", "claude"), queued.get("prompt", ""))
 
 
-def _start_session(session_id: str, api_key: str, port: int):
+def _start_session(session_id: str, api_key: str, port: int, tool: str = "claude", prompt: str = ""):
     """Actually start the Docker container."""
     try:
-        container_id = create_sandbox(session_id, api_key, port)
+        container_id = create_sandbox(session_id, api_key, port, tool=tool, prompt=prompt)
         _sessions[session_id].update({
             "status": "active",
             "container_id": container_id,
@@ -101,6 +102,7 @@ async def create_session(req: CreateSessionRequest):
         "session_id": session_id,
         "api_key": req.api_key,
         "tool": req.tool,
+        "prompt": req.prompt,
         "status": "pending",
         "port": port,
         "created_at": time.time(),
@@ -108,16 +110,18 @@ async def create_session(req: CreateSessionRequest):
     }
 
     if _active_count() < settings.max_sessions:
-        _start_session(session_id, req.api_key, port)
+        _start_session(session_id, req.api_key, port, tool=req.tool, prompt=req.prompt)
+        ws_scheme = "wss" if settings.public_url.startswith("https") else "ws"
+        ws_host = settings.public_url.replace("https://", "").replace("http://", "")
         return SessionResponse(
             session_id=session_id,
             status="active",
-            preview_url=f"https://{session_id}.{settings.preview_domain}",
-            terminal_ws=f"ws://localhost:8100/api/terminal/{session_id}",
+            preview_url=f"{settings.public_url}/preview/{session_id}",
+            terminal_ws=f"{ws_scheme}://{ws_host}/api/terminal/{session_id}",
         )
     else:
         _sessions[session_id]["status"] = "queued"
-        _queue.append({"session_id": session_id, "api_key": req.api_key, "port": port})
+        _queue.append({"session_id": session_id, "api_key": req.api_key, "port": port, "tool": req.tool, "prompt": req.prompt})
         position = len(_queue)
         avg_session = 15 * 60  # 15 min average
         wait = (position * avg_session) // settings.max_sessions
@@ -140,11 +144,13 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     if session["status"] == "active":
+        ws_scheme = "wss" if settings.public_url.startswith("https") else "ws"
+        ws_host = settings.public_url.replace("https://", "").replace("http://", "")
         return SessionResponse(
             session_id=session_id,
             status="active",
-            preview_url=f"https://{session_id}.{settings.preview_domain}",
-            terminal_ws=f"ws://localhost:8100/api/terminal/{session_id}",
+            preview_url=f"{settings.public_url}/preview/{session_id}",
+            terminal_ws=f"{ws_scheme}://{ws_host}/api/terminal/{session_id}",
         )
     elif session["status"] == "queued":
         position = next((i + 1 for i, q in enumerate(_queue) if q["session_id"] == session_id), 0)

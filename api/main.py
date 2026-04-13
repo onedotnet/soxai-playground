@@ -6,6 +6,7 @@ Manages sandbox sessions, WebSocket terminals, and queue.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.preview import router as preview_router
 from api.session import router as session_router
 from api.terminal import router as terminal_router
 
@@ -20,6 +21,7 @@ app.add_middleware(
 
 app.include_router(session_router)
 app.include_router(terminal_router)
+app.include_router(preview_router)
 
 
 @app.get("/healthz")
