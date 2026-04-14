@@ -1,5 +1,6 @@
 """Session management — create, queue, destroy sandbox sessions."""
 
+import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +15,45 @@ from api.docker_manager import (
     get_sandbox_status,
     list_active_sandboxes,
 )
+
+# Wait until the sandbox container's dev server actually answers HTTP on
+# its mapped host port before we tell the caller the session is "active".
+# Docker's port proxy accepts TCP connections the instant `docker run`
+# returns, but the container's Vite process needs ~1-4s (npm → node →
+# vite.listen) to actually bind port 3000. During that window, preview
+# proxy requests land in docker-proxy's half-open connection, bubble up
+# as httpx.RemoteProtocolError/ReadError (NOT ConnectError), and the
+# FastAPI preview route returns 502. Blocking session creation until
+# the port is hot eliminates the race at the source.
+_DEV_SERVER_READY_TIMEOUT_SECONDS = 20.0
+_DEV_SERVER_POLL_INTERVAL_SECONDS = 0.25
+
+
+async def _wait_for_dev_server(port: int) -> bool:
+    """Poll localhost:{port} with a minimal HTTP request until it answers."""
+    deadline = asyncio.get_event_loop().time() + _DEV_SERVER_READY_TIMEOUT_SECONDS
+    while asyncio.get_event_loop().time() < deadline:
+        writer = None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("localhost", port), timeout=0.5
+            )
+            writer.write(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            data = await asyncio.wait_for(reader.read(16), timeout=1.0)
+            if data.startswith(b"HTTP/"):
+                return True
+        except (ConnectionRefusedError, ConnectionResetError, asyncio.TimeoutError, OSError):
+            pass
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        await asyncio.sleep(_DEV_SERVER_POLL_INTERVAL_SECONDS)
+    return False
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -52,7 +92,8 @@ def _active_count() -> int:
 
 
 def _cleanup_expired():
-    """Remove expired sessions."""
+    """Remove expired sessions. Queue dequeue now happens explicitly in
+    create_session after cleanup, because _start_session is async."""
     now = time.time()
     expired = []
     for sid, session in _sessions.items():
@@ -68,18 +109,32 @@ def _cleanup_expired():
         destroy_sandbox(sid)
         _sessions[sid]["status"] = "expired"
 
-    # Process queue
+
+async def _drain_queue():
+    """Pull queued sessions off the queue while slots are free. Awaits
+    _start_session which blocks until the container's dev server is hot."""
     while _queue and _active_count() < settings.max_sessions:
         queued = _queue.pop(0)
-        _start_session(queued["session_id"], queued["api_key"], queued["port"], queued.get("tool", "claude"), queued.get("prompt", ""))
+        await _start_session(
+            queued["session_id"],
+            queued["api_key"],
+            queued["port"],
+            queued.get("tool", "claude"),
+            queued.get("prompt", ""),
+        )
 
 
-def _start_session(session_id: str, api_key: str, port: int, tool: str = "claude", prompt: str = ""):
-    """Actually start the Docker container."""
+async def _start_session(session_id: str, api_key: str, port: int, tool: str = "claude", prompt: str = ""):
+    """Actually start the Docker container and wait for the dev server.
+
+    Session transitions: pending/queued → starting → active (ready) OR
+    error (docker failed). We intentionally block on dev-server readiness
+    so the preview_url we return to the caller is guaranteed hot.
+    """
     try:
         container_id = create_sandbox(session_id, api_key, port, tool=tool, prompt=prompt)
         _sessions[session_id].update({
-            "status": "active",
+            "status": "starting",
             "container_id": container_id,
             "preview_port": port,
             "created_at": time.time(),
@@ -88,6 +143,14 @@ def _start_session(session_id: str, api_key: str, port: int, tool: str = "claude
     except Exception as e:
         _sessions[session_id]["status"] = "error"
         _sessions[session_id]["error"] = str(e)
+        return
+
+    # Block until Vite (or whatever dev server the sandbox image runs)
+    # is actually responding. If it never comes up within the timeout we
+    # still transition to "active" — the preview proxy's warming-up
+    # splash will cover the residual tail.
+    await _wait_for_dev_server(port)
+    _sessions[session_id]["status"] = "active"
 
 
 @router.post("", response_model=SessionResponse)
@@ -110,7 +173,7 @@ async def create_session(req: CreateSessionRequest):
     }
 
     if _active_count() < settings.max_sessions:
-        _start_session(session_id, req.api_key, port, tool=req.tool, prompt=req.prompt)
+        await _start_session(session_id, req.api_key, port, tool=req.tool, prompt=req.prompt)
         ws_scheme = "wss" if settings.public_url.startswith("https") else "ws"
         ws_host = settings.public_url.replace("https://", "").replace("http://", "")
         return SessionResponse(
@@ -174,8 +237,9 @@ async def delete_session(session_id: str):
     destroy_sandbox(session_id)
     _sessions[session_id]["status"] = "ended"
 
-    # Process queue
+    # Slot freed — reap any other expirations and pull from the queue.
     _cleanup_expired()
+    await _drain_queue()
 
     return {"status": "ended"}
 

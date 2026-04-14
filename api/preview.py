@@ -67,7 +67,11 @@ async def proxy(request: Request, session_id: str, path: str = ""):
     client = _get_client()
     body = await request.body()
 
-    last_connect_error: httpx.ConnectError | None = None
+    # Retry on any transport-level error: ConnectError (TCP refused),
+    # ReadError / RemoteProtocolError (TCP accepted by docker-proxy but
+    # container's server not yet bound — fires "Server disconnected"),
+    # ReadTimeout, etc. This race is normal on a freshly booted sandbox.
+    last_transport_error: httpx.TransportError | None = None
     for attempt in range(_CONNECT_RETRIES):
         try:
             resp = await client.request(
@@ -87,20 +91,23 @@ async def proxy(request: Request, session_id: str, path: str = ""):
                 status_code=resp.status_code,
                 headers=resp_headers,
             )
-        except httpx.ConnectError as e:
-            last_connect_error = e
+        except httpx.TransportError as e:
+            last_transport_error = e
             if attempt < _CONNECT_RETRIES - 1:
                 await asyncio.sleep(_CONNECT_RETRY_DELAY_SECONDS)
                 continue
             # Fall through to the warming-up splash.
             break
-        except Exception:
-            return _allow_iframe(PlainTextResponse("Preview proxy error", status_code=502))
+        except Exception as e:
+            return _allow_iframe(PlainTextResponse(
+                f"Preview proxy error: {type(e).__name__}",
+                status_code=502,
+            ))
 
     # All retries exhausted. Show a warming-up splash that auto-refreshes,
     # so the first preview load against a still-booting container turns
     # into a transparent wait instead of a hard 502.
-    _ = last_connect_error  # keep reference for future debug logging
+    _ = last_transport_error  # keep reference for future debug logging
     return _allow_iframe(HTMLResponse(
         "<html><head><meta http-equiv='refresh' content='3'></head>"
         f"<body style='{_DARK_STYLE}'><div style='text-align:center'>"
