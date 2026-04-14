@@ -15,12 +15,25 @@ def _build_env(api_key: str, session_id: str, tool: str, prompt: str) -> dict[st
     processes (entrypoint, docker exec, etc.), not just PID 1.
     """
     gateway = settings.soxai_base_url
+    public_host = getattr(settings, "public_host", None) or "playground.soxai.io"
     env = {
         "SESSION_ID": session_id,
         "TOOL_TYPE": tool,
         "USER_PROMPT": prompt,
         "SOXAI_API_KEY": api_key,
         "SOXAI_BASE_URL": gateway,
+        # Consumed by /workspace/vite.config.js to wire HMR to the public
+        # WebSocket endpoint. Changing this requires rebuilding the
+        # sandbox image (vite.config.js is read at vite server boot).
+        "PLAYGROUND_PUBLIC_HOST": public_host,
+        # Vite only exposes process.env vars to client code if they are
+        # prefixed with VITE_. The chat-app template reads these from
+        # import.meta.env to call the SoxAI API directly from the iframe,
+        # avoiding the need for users to write their own proxy server.
+        # These are session-scoped tokens (destroyed with the session),
+        # so exposing them to the iframe's JS is bounded-risk.
+        "VITE_SOXAI_API_KEY": api_key,
+        "VITE_SOXAI_BASE_URL": f"{gateway}/v1",
     }
 
     # Always set both — Claude Code needs ANTHROPIC_*, user apps may need OPENAI_*

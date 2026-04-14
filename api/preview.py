@@ -3,7 +3,8 @@
 import asyncio
 
 import httpx
-from fastapi import APIRouter, Request
+import websockets
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from api.session import _sessions
@@ -120,3 +121,88 @@ async def proxy(request: Request, session_id: str, path: str = ""):
         "npx next dev       # Next.js</pre></div></body></html>",
         status_code=503,
     ))
+
+
+@router.websocket("/{session_id}/{path:path}")
+async def proxy_ws(websocket: WebSocket, session_id: str, path: str):
+    """Bridge preview WebSocket traffic (Vite HMR) to the sandbox container.
+
+    Vite is configured via /workspace/vite.config.js to open its HMR
+    WebSocket at wss://playground.soxai.io/preview/{SESSION_ID}/__hmr,
+    and the dev server inside the container also listens at that path
+    (server.hmr.path sets both sides). We accept the upgrade here,
+    dial the container at ws://localhost:{preview_port}/preview/{sid}/__hmr,
+    and bridge frames in both directions.
+    """
+    session = _sessions.get(session_id)
+    if not session or session.get("status") not in ("active", "starting"):
+        await websocket.close(code=4004, reason="Session not found")
+        return
+
+    port = session.get("preview_port")
+    if not port:
+        await websocket.close(code=4004, reason="Preview port unknown")
+        return
+
+    # Vite ships the HMR socket with subprotocol "vite-hmr". Echo back
+    # whatever the client requested so the handshake succeeds.
+    requested_subprotocols = websocket.scope.get("subprotocols") or []
+    chosen_sub = requested_subprotocols[0] if requested_subprotocols else None
+
+    # Reconstruct the full path the container's Vite server is listening
+    # on. Since server.hmr.path uses the same /preview/{sid}/__hmr shape,
+    # we forward the entire path verbatim.
+    upstream_path = f"/preview/{session_id}/{path}"
+    upstream_url = f"ws://localhost:{port}{upstream_path}"
+
+    try:
+        await websocket.accept(subprotocol=chosen_sub)
+    except Exception:
+        return
+
+    try:
+        async with websockets.connect(
+            upstream_url,
+            subprotocols=requested_subprotocols or None,
+            open_timeout=5,
+            close_timeout=2,
+            max_size=None,
+        ) as upstream:
+            async def client_to_upstream():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        mtype = msg.get("type")
+                        if mtype == "websocket.disconnect":
+                            return
+                        if msg.get("bytes") is not None:
+                            await upstream.send(msg["bytes"])
+                        elif msg.get("text") is not None:
+                            await upstream.send(msg["text"])
+                except (WebSocketDisconnect, Exception):
+                    return
+
+            async def upstream_to_client():
+                try:
+                    async for data in upstream:
+                        if isinstance(data, (bytes, bytearray)):
+                            await websocket.send_bytes(bytes(data))
+                        else:
+                            await websocket.send_text(data)
+                except Exception:
+                    return
+
+            await asyncio.wait(
+                [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+    except Exception:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
