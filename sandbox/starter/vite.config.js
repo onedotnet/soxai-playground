@@ -1,6 +1,24 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// Vite 8's rolldown prebundler can emit two independent copies of
+// React — one in .vite/deps/react.js and another bundled inside the
+// react-dom dep chunk for react-dom's internal require('react').
+// When the two disagree on ReactCurrentDispatcher.current, React 19
+// throws "Cannot read properties of null (reading 'useState')"
+// from any component that calls a hook. `resolve.dedupe` forces the
+// resolver to collapse both import paths to a single canonical copy,
+// and `optimizeDeps.include` explicitly lists the React entries so
+// they share a single prebundle file.
+const REACT_DEDUPE = ['react', 'react-dom']
+const REACT_OPTIMIZE = [
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'react/jsx-dev-runtime',
+]
+
 // Running inside a sandbox container: docker_manager._build_env sets
 // SESSION_ID + PLAYGROUND_PUBLIC_HOST + SOXAI_API_KEY + SOXAI_BASE_URL,
 // and preview traffic is fronted by Cloudflare at https://playground.soxai.io.
@@ -29,6 +47,12 @@ const soxaiBaseUrl = process.env.SOXAI_BASE_URL || ''
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    dedupe: REACT_DEDUPE,
+  },
+  optimizeDeps: {
+    include: REACT_OPTIMIZE,
+  },
   server: {
     port: 3000,
     host: '0.0.0.0',
