@@ -151,8 +151,14 @@ async def proxy_ws(websocket: WebSocket, session_id: str, path: str):
 
     # Reconstruct the full path the container's Vite server is listening
     # on. Since server.hmr.path uses the same /preview/{sid}/__hmr shape,
-    # we forward the entire path verbatim.
+    # we forward the entire path verbatim — AND the query string, because
+    # Vite 8 appends a `?token=<hex>` CSRF token to the HMR WebSocket URL
+    # and the dev server may validate it on reconnect.
     upstream_path = f"/preview/{session_id}/{path}"
+    query_bytes = websocket.scope.get("query_string", b"") or b""
+    if query_bytes:
+        query_str = query_bytes.decode("ascii", errors="ignore")
+        upstream_path = f"{upstream_path}?{query_str}"
     upstream_url = f"ws://localhost:{port}{upstream_path}"
 
     try:
