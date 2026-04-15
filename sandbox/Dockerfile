@@ -31,7 +31,7 @@ RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
 USER sandbox
 RUN mkdir -p /home/sandbox/starter && cd /home/sandbox/starter && \
     npm init -y > /dev/null 2>&1 && \
-    npm install vite @vitejs/plugin-react react react-dom > /dev/null 2>&1
+    npm install vite @vitejs/plugin-react react react-dom three > /dev/null 2>&1
 
 # Starter files — "Building..." placeholder
 COPY --chown=sandbox:sandbox starter/ /home/sandbox/starter/
